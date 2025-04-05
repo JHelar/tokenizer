@@ -1,7 +1,9 @@
 package tokenize
 
 import (
+	"fmt"
 	"sync"
+	"time"
 )
 
 type Pair struct {
@@ -20,11 +22,9 @@ type FreqCollectorState struct {
 	tokensMu       sync.Mutex
 	tokensInCursor int
 	tokensIn       []rune
-	freqMu         sync.Mutex
-	freq           map[Pair]int
 }
 
-func (state *FreqCollectorState) Collect() {
+func (state *FreqCollectorState) Collect() map[Pair]int {
 	freq := make(map[Pair]int)
 
 	for {
@@ -41,18 +41,14 @@ func (state *FreqCollectorState) Collect() {
 		end = state.tokensInCursor
 		state.tokensMu.Unlock()
 
-		if begin >= end {
+		if end <= begin {
 			break
 		}
 
 		freqCollect(begin, end, &state.tokensIn, &freq)
 	}
 
-	state.freqMu.Lock()
-	for pair, value := range freq {
-		state.freq[pair] += value
-	}
-	state.freqMu.Unlock()
+	return freq
 }
 
 func freqCollect(begin int, end int, tokensIn *[]rune, freq *map[Pair]int) {
@@ -74,11 +70,11 @@ func Tokenize(text string) []Pair {
 	state := FreqCollectorState{
 		tokensIn:       []rune{},
 		tokensInCursor: 0,
-		freq:           make(map[Pair]int),
 	}
 	iteration := 0
+	freq := make(map[Pair]int)
 
-	var wg sync.WaitGroup
+	var sem = make(chan map[Pair]int, FREQ_WORKER_COUNT)
 
 	for i := range 256 {
 		pairs = append(pairs, Pair{
@@ -90,26 +86,34 @@ func Tokenize(text string) []Pair {
 		state.tokensIn = append(state.tokensIn, r)
 	}
 
-	for {
-		// fmt.Printf("Iteration %d\n", iteration)
-		// fmt.Printf("\tToken count: %d\n", len(state.tokensIn))
-		// begin := time.Now()
+	begin := time.Now()
+	tokenLenBegin := len(state.tokensIn)
+	fmt.Printf("Tokenize\n")
+	fmt.Printf("\tStart char count: %d\n", len(state.tokensIn))
 
+	for {
 		for range FREQ_WORKER_COUNT {
-			wg.Add(1)
 			go func() {
-				defer wg.Done()
-				state.Collect()
+				freq := state.Collect()
+				sem <- freq
 			}()
 		}
-		wg.Wait()
+
+		for range FREQ_WORKER_COUNT {
+			workerFreq := <-sem
+			for pair, count := range workerFreq {
+				freq[pair] += count
+			}
+		}
+
+		// freqCollect(0, len(state.tokensIn), &state.tokensIn, &mergedFreq)
 
 		// fmt.Printf("\tFinding pairs: %v\n", time.Since(begin))
 		// begin = time.Now()
 
 		var best_pair Pair
-		for pair, count := range state.freq {
-			if count > state.freq[best_pair] {
+		for pair, count := range freq {
+			if count > freq[best_pair] {
 				best_pair = pair
 			}
 		}
@@ -117,7 +121,7 @@ func Tokenize(text string) []Pair {
 		// fmt.Printf("\tFinding best pair: %v\n", time.Since(begin))
 		// begin = time.Now()
 
-		if state.freq[best_pair] <= 1 {
+		if freq[best_pair] <= 1 {
 			break
 		}
 
@@ -148,8 +152,14 @@ func Tokenize(text string) []Pair {
 
 		tokensOut = nil
 		iteration++
-		clear(state.freq)
+		clear(freq)
 	}
+	compression := int(float32(tokenLenBegin-len(state.tokensIn)) / float32(tokenLenBegin) * 100)
+	fmt.Printf("\tCompleted:        %v\n", time.Since(begin))
+	fmt.Printf("\tIterations:       %v\n", iteration)
+	fmt.Printf("\tEnd char count:   %d\n", len(state.tokensIn))
+	fmt.Printf("\tCompression:      %v%%\n", compression)
+	fmt.Printf("\tPair count:       %d\n", len(pairs)-256)
 
 	return pairs
 }

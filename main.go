@@ -52,7 +52,6 @@ func main() {
 
 			text := string(content[:])
 			pairs := tokenize.Tokenize(text)
-			fmt.Printf("Tokenized: %d pairs\n", len(pairs))
 
 			tokenize.DumpPairs(pairs, destinationPath)
 			fmt.Printf("Saved pairs")
