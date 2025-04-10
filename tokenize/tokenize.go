@@ -17,6 +17,11 @@ func (pair Pair) Equals(another Pair) bool {
 
 const FREQ_COLLECTION_CHUNK_SIZE = 64 * 1024
 const FREQ_WORKER_COUNT = 10
+const MULTI_THREAD = true
+
+var begin time.Time
+
+const REPORT = true
 
 type FreqCollectorState struct {
 	tokensMu       sync.Mutex
@@ -25,11 +30,11 @@ type FreqCollectorState struct {
 }
 
 func (state *FreqCollectorState) Collect() map[Pair]int {
-	freq := make(map[Pair]int)
+	freq := map[Pair]int{}
 
+	var begin, end int
 	for {
 		state.tokensMu.Lock()
-		var begin, end int
 		begin = state.tokensInCursor
 
 		if state.tokensInCursor+FREQ_COLLECTION_CHUNK_SIZE <= len(state.tokensIn) {
@@ -64,6 +69,18 @@ func freqCollect(begin int, end int, tokensIn *[]rune, freq *map[Pair]int) {
 	}
 }
 
+func Report(label string, avgSum *time.Duration, iteration int) {
+	if REPORT {
+		since := time.Since(begin)
+		*avgSum += since
+
+		average := time.Duration(avgSum.Nanoseconds() / int64(iteration+1))
+
+		fmt.Printf("\t%v: %v average %v\n", label, since, average)
+		begin = time.Now()
+	}
+}
+
 func Tokenize(text string) []Pair {
 	tokensOut := []rune{}
 	pairs := []Pair{}
@@ -74,7 +91,15 @@ func Tokenize(text string) []Pair {
 	iteration := 0
 	freq := make(map[Pair]int)
 
-	var sem = make(chan map[Pair]int, FREQ_WORKER_COUNT)
+	begin = time.Now()
+
+	var workers = make(chan map[Pair]int)
+	var iterationBegin time.Time
+
+	var findingPairsSum time.Duration
+	var bestPairsSum time.Duration
+	var replacingSum time.Duration
+	var iterationSum time.Duration
 
 	for i := range 256 {
 		pairs = append(pairs, Pair{
@@ -86,30 +111,36 @@ func Tokenize(text string) []Pair {
 		state.tokensIn = append(state.tokensIn, r)
 	}
 
-	begin := time.Now()
 	tokenLenBegin := len(state.tokensIn)
+
 	fmt.Printf("Tokenize\n")
-	fmt.Printf("\tStart char count: %d\n", len(state.tokensIn))
 
-	for {
-		for range FREQ_WORKER_COUNT {
-			go func() {
-				freq := state.Collect()
-				sem <- freq
-			}()
+	for range 250 {
+		iterationBegin = time.Now()
+
+		if REPORT {
+			fmt.Printf("Iteration %d\n", iteration)
 		}
 
-		for range FREQ_WORKER_COUNT {
-			workerFreq := <-sem
-			for pair, count := range workerFreq {
-				freq[pair] += count
+		if MULTI_THREAD {
+			for range FREQ_WORKER_COUNT {
+				go func() {
+					freq := state.Collect()
+					workers <- freq
+				}()
 			}
+
+			for range FREQ_WORKER_COUNT {
+				workerFreq := <-workers
+				for pair, count := range workerFreq {
+					freq[pair] += count
+				}
+			}
+		} else {
+			freqCollect(0, len(state.tokensIn), &state.tokensIn, &freq)
 		}
 
-		// freqCollect(0, len(state.tokensIn), &state.tokensIn, &mergedFreq)
-
-		// fmt.Printf("\tFinding pairs: %v\n", time.Since(begin))
-		// begin = time.Now()
+		Report("Finding pairs", &findingPairsSum, iteration)
 
 		var best_pair Pair
 		for pair, count := range freq {
@@ -118,8 +149,7 @@ func Tokenize(text string) []Pair {
 			}
 		}
 
-		// fmt.Printf("\tFinding best pair: %v\n", time.Since(begin))
-		// begin = time.Now()
+		Report("Finding best pair", &bestPairsSum, iteration)
 
 		if freq[best_pair] <= 1 {
 			break
@@ -145,7 +175,13 @@ func Tokenize(text string) []Pair {
 				tokensOut = append(tokensOut, state.tokensIn[i])
 			}
 		}
-		// fmt.Printf("\tReplacing Pairs: %v\n", time.Since(begin))
+		Report("Replacing Pairs", &replacingSum, iteration)
+		if REPORT {
+			since := time.Since(iterationBegin)
+			iterationSum = iterationSum + since
+			average := time.Duration(iterationSum.Nanoseconds() / int64(iteration+1))
+			fmt.Printf("\tIteration time: %v average %v\n", time.Since(iterationBegin), average)
+		}
 
 		state.tokensIn = tokensOut
 		state.tokensInCursor = 0
@@ -155,11 +191,11 @@ func Tokenize(text string) []Pair {
 		clear(freq)
 	}
 	compression := int(float32(tokenLenBegin-len(state.tokensIn)) / float32(tokenLenBegin) * 100)
-	fmt.Printf("\tCompleted:        %v\n", time.Since(begin))
-	fmt.Printf("\tIterations:       %v\n", iteration)
-	fmt.Printf("\tEnd char count:   %d\n", len(state.tokensIn))
-	fmt.Printf("\tCompression:      %v%%\n", compression)
-	fmt.Printf("\tPair count:       %d\n", len(pairs)-256)
+	fmt.Printf("Start char count: %d\n", tokenLenBegin)
+	fmt.Printf("Iterations:       %v\n", iteration)
+	fmt.Printf("End char count:   %d\n", len(state.tokensIn))
+	fmt.Printf("Compression:      %v%%\n", compression)
+	fmt.Printf("Pair count:       %d\n", len(pairs)-256)
 
 	return pairs
 }
